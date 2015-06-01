@@ -1,0 +1,4 @@
+[package]
+name = "rs-cron"
+version = "0.1.0"
+authors = ["gnieto <gnieto.talo@gmail.com>"]
