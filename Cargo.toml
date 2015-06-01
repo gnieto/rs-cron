@@ -1,4 +1,8 @@
 [package]
 name = "rs-cron"
 version = "0.1.0"
-authors = ["gnieto <gnieto.talo@gmail.com>"]
+authors = ["Guillem Nieto <gnieto.talo@gmail.com>"]
+
+[dependencies]
+uuid = "0.1"
+time = "0.1"
