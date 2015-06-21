@@ -16,7 +16,7 @@ fn main() {
     for i in 0..5 {
         let mut current_time = now();
         current_time = current_time + Duration::seconds(i + 1);
-        let t = current_time.to_timespec().sec as u32;
+        let t = current_time.to_timespec();
 
         let job = CronJob::new(t, Box::new(EchoCronJobExecutor));
         let id = job.id;

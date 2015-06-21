@@ -9,12 +9,12 @@ use threadpool::ThreadPool;
 
 pub struct CronJob {
     pub id: Uuid,
-    pub timestamp: u32,
+    pub timestamp: Timespec,
     pub executor: Box<CronJobExecutor>
 }
 
 impl CronJob{
-    pub fn new(ts: u32, executor: Box<CronJobExecutor>) -> CronJob {
+    pub fn new(ts: Timespec, executor: Box<CronJobExecutor>) -> CronJob {
         CronJob {
             id: Uuid::new_v4(),
             timestamp: ts,
@@ -39,7 +39,7 @@ pub struct EchoCronJobExecutor;
 
 impl CronJobExecutor for EchoCronJobExecutor {
     fn execute(&self, cron_job: &CronJob) {
-        println!("[{}]Executing job {}", now().to_timespec().sec, cron_job.id);
+        println!("[{:?}]Executing job {}", now().to_timespec(), cron_job.id);
     }
 }
 
@@ -94,7 +94,7 @@ impl CronWrapper {
 }
 
 pub struct Cron {
-    pub jobs: BTreeMap<u32, Vec<CronJob>>,
+    pub jobs: BTreeMap<Timespec, Vec<CronJob>>,
     num_jobs: u32,
     thread_pool: ThreadPool,
 }
@@ -110,7 +110,7 @@ impl Cron {
     }
 
     pub fn run(&mut self) {
-        let current_time = now().to_timespec().sec as u32;
+        let current_time = now().to_timespec();
         self.check(current_time);
     }
 
@@ -127,8 +127,8 @@ impl Cron {
         self.num_jobs = self.num_jobs + 1;
     }
 
-    pub fn check(&mut self, current_time: u32) {
-        let mut keys_to_remove: Vec<u32> = Vec::new();
+    pub fn check(&mut self, current_time: Timespec) {
+        let mut keys_to_remove: Vec<Timespec> = Vec::new();
         for (&key, value) in self.jobs.range(Unbounded, Included(&current_time)) {
             keys_to_remove.push(key);
         }
@@ -167,7 +167,8 @@ mod test {
         let mut c = Cron::new();
 
         for i in 0..100 {
-            let cj = CronJob::new(100 * i, Box::new(DummyCronJobExecutor));
+            let t = Timespec::new(100 * i, 0);
+            let cj = CronJob::new(t, Box::new(DummyCronJobExecutor));
             c.schedule(cj);
         }
 
@@ -179,11 +180,12 @@ mod test {
         let mut c = Cron::new();
 
         for i in 0..100 {
-            let cj = CronJob::new(100 * i, Box::new(DummyCronJobExecutor));
+            let t = Timespec::new(100 * i, 0);
+            let cj = CronJob::new(t, Box::new(DummyCronJobExecutor));
             c.schedule(cj);
         }
 
-        c.check(400);
+        c.check(Timespec::new(400, 0));
         assert_eq!(c.count(), 100 - 5);
     }
 
@@ -197,7 +199,7 @@ mod test {
         let mut c = Cron::new();
 
         b.iter(|| {
-            let timestamp = now().to_timespec().sec as u32;
+            let timestamp = now().to_timespec();
             let cj = CronJob::new(timestamp, Box::new(DummyCronJobExecutor));
             c.schedule(cj);
         });
