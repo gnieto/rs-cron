@@ -6,3 +6,4 @@ authors = ["Guillem Nieto <gnieto.talo@gmail.com>"]
 [dependencies]
 uuid = "0.1"
 time = "0.1"
+threadpool = "*"

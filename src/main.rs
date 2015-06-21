@@ -2,6 +2,7 @@
 extern crate uuid;
 extern crate time;
 extern crate test;
+extern crate threadpool;
 
 mod cron;
 

@@ -5,7 +5,7 @@ use time::*;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::*;
 use std::thread;
-
+use threadpool::ThreadPool;
 
 pub struct CronJob {
     pub id: Uuid,
@@ -39,7 +39,7 @@ pub struct EchoCronJobExecutor;
 
 impl CronJobExecutor for EchoCronJobExecutor {
     fn execute(&self, cron_job: &CronJob) {
-        println!("Executing job {}", cron_job.id)
+        println!("[{}]Executing job {}", now().to_timespec().sec, cron_job.id);
     }
 }
 
@@ -96,11 +96,16 @@ impl CronWrapper {
 pub struct Cron {
     pub jobs: BTreeMap<u32, Vec<CronJob>>,
     num_jobs: u32,
+    thread_pool: ThreadPool,
 }
 
 impl Cron {
     pub fn new() -> Cron {
-        let c = Cron {jobs: BTreeMap::new(), num_jobs: 0};
+        let c = Cron {
+            jobs: BTreeMap::new(),
+            num_jobs: 0,
+            thread_pool: ThreadPool::new(1),
+        };
         c
     }
 
@@ -131,8 +136,17 @@ impl Cron {
         for k in keys_to_remove {
             let mut jobs_to_process = self.jobs.remove(&k).unwrap();
             self.num_jobs = self.num_jobs - jobs_to_process.len() as u32;
-            for job in jobs_to_process.iter_mut() {
-                job.executor.execute(job)
+            
+            loop {
+                let element = jobs_to_process.pop();
+                match element {
+                    None => break,
+                    Some(job) => {
+                        self.thread_pool.execute(move || {
+                            job.executor.execute(&job)
+                        });
+                    },
+                }
             }
         }
     }
