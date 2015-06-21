@@ -2,69 +2,118 @@ use uuid::Uuid;
 use std::collections::BTreeMap;
 use std::collections::Bound::{Included, Unbounded};
 use time::*;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+use std::sync::mpsc::*;
+use std::thread;
 
-use test::Bencher;
 
-pub trait CronJob {
-    fn execute(&mut self);
-    fn get_time(&self) -> u32;
-    fn get_id(&self) -> Uuid;
-}
-
-pub struct TestCronJob {
+pub struct CronJob {
     pub id: Uuid,
-    pub tag: Option<String>,
     pub timestamp: u32,
-    pub callback: Box<Fn()->()>,
-    counter: u32,
+    pub executor: Box<CronJobExecutor>
 }
 
-impl TestCronJob {
-    pub fn new(tag: Option<String>, ts: u32, cb: Box<Fn()->()>) -> TestCronJob {
-        TestCronJob {
+impl CronJob{
+    pub fn new(ts: u32, executor: Box<CronJobExecutor>) -> CronJob {
+        CronJob {
             id: Uuid::new_v4(),
-            tag: tag,
             timestamp: ts,
-            callback: cb,
-            counter: 0,
+            executor: executor
         }
     }
+}
 
-    pub fn get_counter(&self) -> u32 {
-        self.counter
+pub trait CronJobExecutor: Send + Sync {
+    fn execute(&self, cron_job: &CronJob);
+}
+
+pub struct DummyCronJobExecutor;
+
+impl CronJobExecutor for DummyCronJobExecutor {
+    fn execute(&self, cron_job: &CronJob) {
+
     }
 }
 
-impl CronJob for TestCronJob {
-    fn execute(&mut self) {
-        println!("Test cron job");
-    }
+pub struct EchoCronJobExecutor;
 
-    fn get_time(&self) -> u32 {
-        self.timestamp
-    }
-
-    fn get_id(&self) -> Uuid {
-        self.id
+impl CronJobExecutor for EchoCronJobExecutor {
+    fn execute(&self, cron_job: &CronJob) {
+        println!("Executing job {}", cron_job.id)
     }
 }
 
-pub struct Cron<J> where J: CronJob {
-    pub jobs: BTreeMap<u32, Vec<Box<J>>>,
+pub struct CronWrapper {
+    pub cron_ref: Arc<Mutex<Cron>>,
+    pub tx: Sender<CronJob>,
+}
+
+impl CronWrapper {
+    pub fn new() -> CronWrapper {
+        let c = Cron::new();
+        let rc = Mutex::new(c);
+        let arc = Arc::new(rc);
+        
+        let (tx, rx) = channel();
+
+        let run_cron = arc.clone();
+
+        thread::spawn(move || {
+            loop {
+                let mut _cron = run_cron.lock().unwrap();
+                _cron.run();
+            }
+        });
+
+        let recv_cron = arc.clone();
+
+        thread::spawn(move || {
+            for job in rx.iter() {
+                let mut _cron = recv_cron.lock().unwrap();
+                _cron.schedule(job);
+            }
+        });
+
+        let cw = CronWrapper {cron_ref: arc.clone(), tx: tx};
+        cw
+    }
+
+    pub fn schedule(&self, job: CronJob) -> Result<(), &'static str> {
+       let result = self.tx.send(job); 
+       match result {
+            Ok(_) => Result::Ok(()),
+            Err(_) => Result::Err("Can not schedule the job"),
+       }
+    }
+
+    pub fn count(&self) -> u32 {
+        let r = self.cron_ref.clone();
+        let _cron = r.lock().unwrap();
+        _cron.count()
+    }
+}
+
+pub struct Cron {
+    pub jobs: BTreeMap<u32, Vec<CronJob>>,
     num_jobs: u32,
 }
 
-impl<J> Cron<J> where J: CronJob {
-    pub fn new() -> Cron<J> {
-        Cron {jobs: BTreeMap::new(), num_jobs: 0}
+impl Cron {
+    pub fn new() -> Cron {
+        let c = Cron {jobs: BTreeMap::new(), num_jobs: 0};
+        c
     }
 
-    pub fn schedule(&mut self, job: Box<J>) {
-        let ts = job.get_time();
+    pub fn run(&mut self) {
+        let current_time = now().to_timespec().sec as u32;
+        self.check(current_time);
+    }
+
+    pub fn schedule(&mut self, job: CronJob) {
+        let ts = job.timestamp;
 
         if !self.jobs.contains_key(&ts) {
-            let v: Vec<Box<J>> = Vec::new();
+            let v: Vec<CronJob> = Vec::new();
             self.jobs.insert(ts, v);
         }
         
@@ -77,14 +126,13 @@ impl<J> Cron<J> where J: CronJob {
         let mut keys_to_remove: Vec<u32> = Vec::new();
         for (&key, value) in self.jobs.range(Unbounded, Included(&current_time)) {
             keys_to_remove.push(key);
-            println!("{}: {}", key, value.len())
         }
 
         for k in keys_to_remove {
             let mut jobs_to_process = self.jobs.remove(&k).unwrap();
             self.num_jobs = self.num_jobs - jobs_to_process.len() as u32;
             for job in jobs_to_process.iter_mut() {
-                job.execute()
+                job.executor.execute(job)
             }
         }
     }
@@ -94,59 +142,50 @@ impl<J> Cron<J> where J: CronJob {
     }
 }
 
-fn dummy_callback() {
-    println!("Callback!");
-}
+#[cfg(test)]
+mod test {
+    use super::*;
+    use test::Bencher;
+    use time::*;
 
-#[test]
-fn it_can_contain_multiple_cron_jobs() {
-    let mut c = Cron::new();
+    #[test]
+    fn it_can_contain_multiple_cron_jobs() {
+        let mut c = Cron::new();
 
-    for i in 0..100 {
-        let cj = TestCronJob::new(None, 100 * i, Box::new(dummy_callback));
-        c.schedule(Box::new(cj));
+        for i in 0..100 {
+            let cj = CronJob::new(100 * i, Box::new(DummyCronJobExecutor));
+            c.schedule(cj);
+        }
+
+        assert_eq!(c.count(), 100)
+    }
+ 
+    #[test]
+    fn it_can_check_which_jobs_are_outdated() {
+        let mut c = Cron::new();
+
+        for i in 0..100 {
+            let cj = CronJob::new(100 * i, Box::new(DummyCronJobExecutor));
+            c.schedule(cj);
+        }
+
+        c.check(400);
+        assert_eq!(c.count(), 100 - 5);
     }
 
-    assert_eq!(c.count(), 100)
-}
-
-#[test]
-fn it_can_check_which_jobs_are_outdated() {
-    let mut c = Cron::new();
-
-    for i in 0..100 {
-        let cb = Box::new(dummy_callback);
-        let cj = TestCronJob::new(None, 100 * i, cb);
-        c.schedule(Box::new(cj));
+    #[test]
+    fn it_call_callbalcks_on_outdated_jobs() {
+        // Pending to implement
     }
 
-    c.check(400);
-    assert_eq!(c.count(), 100 - 5);
-}
+    #[bench]
+    fn insert_performance(b: &mut Bencher) {
+        let mut c = Cron::new();
 
-#[test]
-fn it_call_callbalcks_on_outdated_jobs() {
-    let mut c = Cron::new();
-   
-    let cj1 = Box::new(TestCronJob::new(None, 10, Box::new(dummy_callback)));
-    let cj2 = Box::new(TestCronJob::new(None, 20, Box::new(dummy_callback)));
-
-    c.schedule(cj1);
-    c.schedule(cj2);
-
-    c.check(15);
-    assert_eq!(c.count(), 1);
-}
-
-#[bench]
-fn insert_performance(b: &mut Bencher) {
-    let mut c = Cron::new();
-
-    b.iter(|| {
-        let timestamp = now().to_timespec().sec as u32;
-        let cb = Box::new(dummy_callback);
-        let cj = TestCronJob::new(None, timestamp, cb);
-
-        c.schedule(Box::new(cj));  
-    });
+        b.iter(|| {
+            let timestamp = now().to_timespec().sec as u32;
+            let cj = CronJob::new(timestamp, Box::new(DummyCronJobExecutor));
+            c.schedule(cj);
+        });
+    }
 }

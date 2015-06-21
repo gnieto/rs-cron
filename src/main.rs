@@ -5,44 +5,25 @@ extern crate test;
 
 mod cron;
 
-use cron::cron::{CronJob, Cron};
-use uuid::Uuid;
-
-pub struct EchoJob {
-    pub ts: u32,
-    pub id: Uuid,
-}
-
-impl EchoJob {
-    pub fn new(ts: u32) -> EchoJob {
-        EchoJob {
-            ts: ts,
-            id: Uuid::new_v4(),
-        }
-    }
-}
-
-impl CronJob for EchoJob {
-    fn execute(&mut self) {
-        println!("Echo")
-    }
-
-    fn get_id(&self) -> Uuid {
-        self.id
-    }
-
-    fn get_time(&self) -> u32 {
-        self.ts
-    }
-}
-
+use cron::cron::*;
+use std::thread;
+use time::*;
 
 fn main() {
-    let mut c = Cron::new();
+    let c = CronWrapper::new();
 
-    for i in 0..100 {
-        c.schedule(Box::new(EchoJob::new(i as u32)));
+    for i in 0..5 {
+        let mut current_time = now();
+        current_time = current_time + Duration::seconds(i + 1);
+        let t = current_time.to_timespec().sec as u32;
+
+        let job = CronJob::new(t, Box::new(EchoCronJobExecutor));
+        let id = job.id;
+        c.schedule(job).unwrap();
+        println!("Scheduled: {}", id);
     }
 
-    c.check(500);
+    println!("Num jobs: {}", c.count());
+    thread::sleep_ms(6000);
+    println!("Num jobs: {}", c.count());
 }
