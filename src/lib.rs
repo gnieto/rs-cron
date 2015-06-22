@@ -5,7 +5,7 @@ extern crate time;
 extern crate threadpool;
 extern crate test;
 
-mod cron;
+pub mod cron;
 
 #[test]
 fn it_works() {
