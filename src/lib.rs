@@ -1,4 +1,4 @@
-#![feature(collections, test)]
+#![feature(collections, test, collections_bound, btree_range)]
 
 extern crate uuid;
 extern crate time;
