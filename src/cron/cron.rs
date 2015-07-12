@@ -24,6 +24,22 @@ impl CronJob{
     }
 }
 
+pub struct CronJobResult {
+    pub id: Uuid,
+    pub timestamp: Timespec,
+    pub execution: Timespec,
+}
+
+impl CronJobResult {
+    pub fn new(id: Uuid, timestamp: Timespec, execution: Timespec) -> CronJobResult {
+        CronJobResult {
+            id: id,
+            timestamp: timestamp,
+            execution: execution,
+        }
+    }
+}
+
 pub trait CronJobExecutor: Send + Sync {
     fn execute(&self, cron_job: &CronJob);
 }
@@ -46,17 +62,18 @@ impl CronJobExecutor for EchoCronJobExecutor {
 
 pub struct CronWrapper {
     pub cron_ref: Arc<Mutex<Cron>>,
-    pub tx: Sender<CronJob>,
+    pub tx_input: Sender<CronJob>,
+    pub rx_output: Receiver<CronJobResult>,
 }
 
 impl CronWrapper {
     pub fn new() -> CronWrapper {
-        let c = Cron::new();
+        let (tx_input, rx_input) = channel();
+        let (tx_output, rx_output) = channel();
+
+        let c = Cron::new_with_out_channel(tx_output);
         let rc = Mutex::new(c);
         let arc = Arc::new(rc);
-        
-        let (tx, rx) = channel();
-
         let run_cron = arc.clone();
 
         thread::spawn(move || {
@@ -69,18 +86,18 @@ impl CronWrapper {
         let recv_cron = arc.clone();
 
         thread::spawn(move || {
-            for job in rx.iter() {
+            for job in rx_input.iter() {
                 let mut _cron = recv_cron.lock().unwrap();
                 _cron.schedule(job);
             }
         });
 
-        let cw = CronWrapper {cron_ref: arc.clone(), tx: tx};
+        let cw = CronWrapper {cron_ref: arc.clone(), tx_input: tx_input, rx_output: rx_output};
         cw
     }
 
     pub fn schedule(&self, job: CronJob) -> Result<(), &'static str> {
-       let result = self.tx.send(job); 
+       let result = self.tx_input.send(job); 
        match result {
             Ok(_) => Result::Ok(()),
             Err(_) => Result::Err("Can not schedule the job"),
@@ -105,6 +122,7 @@ pub struct Cron {
     pub jobs_hash: HashMap<Uuid, bool>, // Maybe bitmap?
     num_jobs: u32,
     thread_pool: ThreadPool,
+    done_jobs_tx: Option<Sender<CronJobResult>>,
 }
 
 impl Cron {
@@ -114,7 +132,14 @@ impl Cron {
             jobs_hash: HashMap::new(),
             num_jobs: 0,
             thread_pool: ThreadPool::new(1),
+            done_jobs_tx: None,
         };
+        c
+    }
+
+    pub fn new_with_out_channel(tx_channel: Sender<CronJobResult>) -> Cron {
+        let mut c = Cron::new();
+        c.done_jobs_tx = Some(tx_channel);
         c
     }
 
@@ -154,8 +179,14 @@ impl Cron {
                     None => break,
                     Some(job) => {
                         self.jobs_hash.remove(&job.id);
+
+                        if self.done_jobs_tx.is_some() {
+                            let cj_result = CronJobResult::new(job.id, job.timestamp, current_time);
+                            self.done_jobs_tx.as_mut().unwrap().send(cj_result);
+                        }
+
                         self.thread_pool.execute(move || {
-                            job.executor.execute(&job)
+                            job.executor.execute(&job);
                         });
                     },
                 }
@@ -178,6 +209,8 @@ mod test {
     use test::Bencher;
     use time::*;
     use uuid::Uuid;
+    use std::sync::mpsc::*;
+    use std::thread;
 
     #[test]
     fn it_can_contain_multiple_cron_jobs() {
@@ -223,6 +256,28 @@ mod test {
         assert_eq!(false, c.has(Uuid::new_v4()));
         c.check(Timespec::new(100, 0));
         assert_eq!(false, c.has(uuid));
+    }
+
+    #[test]
+    fn it_can_create_a_cron_with_output_channel() {
+        let (tx, rx) = channel();
+        let mut c = Cron::new_with_out_channel(tx);
+    }
+
+    #[test]
+    fn cron_wrapper_can_hook_to_done_jobs_channel() {
+        let mut cw = CronWrapper::new();
+        let job = CronJob::new(Timespec::new(400, 0), Box::new(DummyCronJobExecutor));
+        cw.schedule(job);
+
+        let join_handler = thread::spawn(move || {
+            for done_job in cw.rx_output.iter() {
+                break;
+            }
+        });
+        
+        // TODO: Set some timeout to make fail the test
+        join_handler.join();
     }
 
     #[bench]
