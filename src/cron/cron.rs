@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::sync::mpsc::*;
 use std::thread;
 use threadpool::ThreadPool;
+use std::collections::HashMap;
 
 pub struct CronJob {
     pub id: Uuid,
@@ -91,10 +92,17 @@ impl CronWrapper {
         let _cron = r.lock().unwrap();
         _cron.count()
     }
+
+    pub fn has(&self, id: Uuid) -> bool {
+        let r = self.cron_ref.clone();
+        let _cron = r.lock().unwrap();
+        _cron.has(id)
+    }
 }
 
 pub struct Cron {
     pub jobs: BTreeMap<Timespec, Vec<CronJob>>,
+    pub jobs_hash: HashMap<Uuid, bool>, // Maybe bitmap?
     num_jobs: u32,
     thread_pool: ThreadPool,
 }
@@ -103,6 +111,7 @@ impl Cron {
     pub fn new() -> Cron {
         let c = Cron {
             jobs: BTreeMap::new(),
+            jobs_hash: HashMap::new(),
             num_jobs: 0,
             thread_pool: ThreadPool::new(1),
         };
@@ -116,6 +125,7 @@ impl Cron {
 
     pub fn schedule(&mut self, job: CronJob) {
         let ts = job.timestamp;
+        let id = job.id;
 
         if !self.jobs.contains_key(&ts) {
             let v: Vec<CronJob> = Vec::new();
@@ -124,6 +134,7 @@ impl Cron {
         
         let mut v = self.jobs.get_mut(&ts).unwrap();
         v.push(job);
+        self.jobs_hash.insert(id, true);
         self.num_jobs = self.num_jobs + 1;
     }
 
@@ -142,6 +153,7 @@ impl Cron {
                 match element {
                     None => break,
                     Some(job) => {
+                        self.jobs_hash.remove(&job.id);
                         self.thread_pool.execute(move || {
                             job.executor.execute(&job)
                         });
@@ -149,6 +161,10 @@ impl Cron {
                 }
             }
         }
+    }
+
+    pub fn has(&self, id: Uuid) -> bool {
+        return self.jobs_hash.get(&id).is_some();
     }
 
     pub fn count(&self) -> u32 {
@@ -161,6 +177,7 @@ mod test {
     use super::*;
     use test::Bencher;
     use time::*;
+    use uuid::Uuid;
 
     #[test]
     fn it_can_contain_multiple_cron_jobs() {
@@ -192,6 +209,20 @@ mod test {
     #[test]
     fn it_call_callbalcks_on_outdated_jobs() {
         // Pending to implement
+    }
+
+    #[test]
+    fn it_can_check_if_a_job_is_pending_to_be_processed() {
+        let mut c = Cron::new();
+
+        let t = Timespec::new(100, 0);
+        let cj = CronJob::new(t, Box::new(DummyCronJobExecutor));
+        let uuid = cj.id;
+        c.schedule(cj);
+        assert_eq!(true, c.has(uuid));
+        assert_eq!(false, c.has(Uuid::new_v4()));
+        c.check(Timespec::new(100, 0));
+        assert_eq!(false, c.has(uuid));
     }
 
     #[bench]
